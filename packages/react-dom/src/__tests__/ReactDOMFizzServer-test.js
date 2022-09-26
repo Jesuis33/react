@@ -19,6 +19,7 @@ let Suspense;
 let SuspenseList;
 let useSyncExternalStore;
 let useSyncExternalStoreWithSelector;
+let use;
 let PropTypes;
 let textCache;
 let window;
@@ -42,6 +43,7 @@ describe('ReactDOMFizzServer', () => {
     Suspense = React.Suspense;
     if (gate(flags => flags.enableSuspenseList)) {
       SuspenseList = React.SuspenseList;
+      use = React.experimental_use;
     }
 
     PropTypes = require('prop-types');
@@ -90,7 +92,7 @@ describe('ReactDOMFizzServer', () => {
   function expectErrors(errorsArr, toBeDevArr, toBeProdArr) {
     const mappedErrows = errorsArr.map(({error, errorInfo}) => {
       const stack = errorInfo && errorInfo.componentStack;
-      const digest = errorInfo && errorInfo.digest;
+      const digest = error.digest;
       if (stack) {
         return [error.message, digest, normalizeCodeLocInfo(stack)];
       } else if (digest) {
@@ -3228,6 +3230,47 @@ describe('ReactDOMFizzServer', () => {
     );
   });
 
+  it('warns in dev if you access digest from errorInfo in onRecoverableError', async () => {
+    await act(async () => {
+      const {pipe} = ReactDOMFizzServer.renderToPipeableStream(
+        <div>
+          <Suspense fallback={'loading...'}>
+            <AsyncText text={'hello'} />
+          </Suspense>
+        </div>,
+        {
+          onError(error) {
+            return 'a digest';
+          },
+        },
+      );
+      rejectText('hello');
+      pipe(writable);
+    });
+    expect(getVisibleChildren(container)).toEqual(<div>loading...</div>);
+
+    ReactDOMClient.hydrateRoot(
+      container,
+      <div>
+        <Suspense fallback={'loading...'}>hello</Suspense>
+      </div>,
+      {
+        onRecoverableError(error, errorInfo) {
+          expect(() => {
+            expect(error.digest).toBe('a digest');
+            expect(errorInfo.digest).toBe('a digest');
+          }).toErrorDev(
+            'Warning: You are accessing "digest" from the errorInfo object passed to onRecoverableError.' +
+              ' This property is deprecated and will be removed in a future version of React.' +
+              ' To access the digest of an Error look for this property on the Error instance itself.',
+            {withoutStack: true},
+          );
+        },
+      },
+    );
+    expect(Scheduler).toFlushWithoutYielding();
+  });
+
   describe('error escaping', () => {
     it('escapes error hash, message, and component stack values in directly flushed errors (html escaping)', async () => {
       window.__outlet = {};
@@ -5242,6 +5285,264 @@ describe('ReactDOMFizzServer', () => {
       } finally {
         console.error = originalConsoleError;
       }
+    });
+
+    // @gate enableUseHook
+    it('basic use(promise)', async () => {
+      const promiseA = Promise.resolve('A');
+      const promiseB = Promise.resolve('B');
+      const promiseC = Promise.resolve('C');
+
+      function Async() {
+        return use(promiseA) + use(promiseB) + use(promiseC);
+      }
+
+      function App() {
+        return (
+          <Suspense fallback="Loading...">
+            <Async />
+          </Suspense>
+        );
+      }
+
+      await act(async () => {
+        const {pipe} = ReactDOMFizzServer.renderToPipeableStream(<App />);
+        pipe(writable);
+      });
+
+      // TODO: The `act` implementation in this file doesn't unwrap microtasks
+      // automatically. We can't use the same `act` we use for Fiber tests
+      // because that relies on the mock Scheduler. Doesn't affect any public
+      // API but we might want to fix this for our own internal tests.
+      //
+      // For now, wait for each promise in sequence.
+      await act(async () => {
+        await promiseA;
+      });
+      await act(async () => {
+        await promiseB;
+      });
+      await act(async () => {
+        await promiseC;
+      });
+
+      expect(getVisibleChildren(container)).toEqual('ABC');
+
+      ReactDOMClient.hydrateRoot(container, <App />);
+      expect(Scheduler).toFlushAndYield([]);
+      expect(getVisibleChildren(container)).toEqual('ABC');
+    });
+
+    // @gate enableUseHook
+    it('basic use(context)', async () => {
+      const ContextA = React.createContext('default');
+      const ContextB = React.createContext('B');
+      const ServerContext = React.createServerContext(
+        'ServerContext',
+        'default',
+      );
+      function Client() {
+        return use(ContextA) + use(ContextB);
+      }
+      function ServerComponent() {
+        return use(ServerContext);
+      }
+      function Server() {
+        return (
+          <ServerContext.Provider value="C">
+            <ServerComponent />
+          </ServerContext.Provider>
+        );
+      }
+      function App() {
+        return (
+          <>
+            <ContextA.Provider value="A">
+              <Client />
+            </ContextA.Provider>
+            <Server />
+          </>
+        );
+      }
+
+      await act(async () => {
+        const {pipe} = ReactDOMFizzServer.renderToPipeableStream(<App />);
+        pipe(writable);
+      });
+      expect(getVisibleChildren(container)).toEqual(['AB', 'C']);
+
+      // Hydration uses a different renderer runtime (Fiber instead of Fizz).
+      // We reset _currentRenderer here to not trigger a warning about multiple
+      // renderers concurrently using these contexts
+      ContextA._currentRenderer = null;
+      ServerContext._currentRenderer = null;
+      ReactDOMClient.hydrateRoot(container, <App />);
+      expect(Scheduler).toFlushAndYield([]);
+      expect(getVisibleChildren(container)).toEqual(['AB', 'C']);
+    });
+
+    // @gate enableUseHook
+    it('use(promise) in multiple components', async () => {
+      const promiseA = Promise.resolve('A');
+      const promiseB = Promise.resolve('B');
+      const promiseC = Promise.resolve('C');
+      const promiseD = Promise.resolve('D');
+
+      function Child({prefix}) {
+        return prefix + use(promiseC) + use(promiseD);
+      }
+
+      function Parent() {
+        return <Child prefix={use(promiseA) + use(promiseB)} />;
+      }
+
+      function App() {
+        return (
+          <Suspense fallback="Loading...">
+            <Parent />
+          </Suspense>
+        );
+      }
+
+      await act(async () => {
+        const {pipe} = ReactDOMFizzServer.renderToPipeableStream(<App />);
+        pipe(writable);
+      });
+
+      // TODO: The `act` implementation in this file doesn't unwrap microtasks
+      // automatically. We can't use the same `act` we use for Fiber tests
+      // because that relies on the mock Scheduler. Doesn't affect any public
+      // API but we might want to fix this for our own internal tests.
+      //
+      // For now, wait for each promise in sequence.
+      await act(async () => {
+        await promiseA;
+      });
+      await act(async () => {
+        await promiseB;
+      });
+      await act(async () => {
+        await promiseC;
+      });
+      await act(async () => {
+        await promiseD;
+      });
+
+      expect(getVisibleChildren(container)).toEqual('ABCD');
+
+      ReactDOMClient.hydrateRoot(container, <App />);
+      expect(Scheduler).toFlushAndYield([]);
+      expect(getVisibleChildren(container)).toEqual('ABCD');
+    });
+
+    // @gate enableUseHook
+    it('using a rejected promise will throw', async () => {
+      const promiseA = Promise.resolve('A');
+      const promiseB = Promise.reject(new Error('Oops!'));
+      const promiseC = Promise.resolve('C');
+
+      // Jest/Node will raise an unhandled rejected error unless we await this. It
+      // works fine in the browser, though.
+      await expect(promiseB).rejects.toThrow('Oops!');
+
+      function Async() {
+        return use(promiseA) + use(promiseB) + use(promiseC);
+      }
+
+      class ErrorBoundary extends React.Component {
+        state = {error: null};
+        static getDerivedStateFromError(error) {
+          return {error};
+        }
+        render() {
+          if (this.state.error) {
+            return this.state.error.message;
+          }
+          return this.props.children;
+        }
+      }
+
+      function App() {
+        return (
+          <Suspense fallback="Loading...">
+            <ErrorBoundary>
+              <Async />
+            </ErrorBoundary>
+          </Suspense>
+        );
+      }
+
+      const reportedServerErrors = [];
+      await act(async () => {
+        const {pipe} = ReactDOMFizzServer.renderToPipeableStream(<App />, {
+          onError(error) {
+            reportedServerErrors.push(error);
+          },
+        });
+        pipe(writable);
+      });
+
+      // TODO: The `act` implementation in this file doesn't unwrap microtasks
+      // automatically. We can't use the same `act` we use for Fiber tests
+      // because that relies on the mock Scheduler. Doesn't affect any public
+      // API but we might want to fix this for our own internal tests.
+      //
+      // For now, wait for each promise in sequence.
+      await act(async () => {
+        await promiseA;
+      });
+      await act(async () => {
+        await expect(promiseB).rejects.toThrow('Oops!');
+      });
+      await act(async () => {
+        await promiseC;
+      });
+
+      expect(getVisibleChildren(container)).toEqual('Loading...');
+      expect(reportedServerErrors.length).toBe(1);
+      expect(reportedServerErrors[0].message).toBe('Oops!');
+
+      const reportedClientErrors = [];
+      ReactDOMClient.hydrateRoot(container, <App />, {
+        onRecoverableError(error) {
+          reportedClientErrors.push(error);
+        },
+      });
+      expect(Scheduler).toFlushAndYield([]);
+      expect(getVisibleChildren(container)).toEqual('Oops!');
+      expect(reportedClientErrors.length).toBe(1);
+      if (__DEV__) {
+        expect(reportedClientErrors[0].message).toBe('Oops!');
+      } else {
+        expect(reportedClientErrors[0].message).toBe(
+          'The server could not finish this Suspense boundary, likely due to ' +
+            'an error during server rendering. Switched to client rendering.',
+        );
+      }
+    });
+
+    // @gate enableUseHook
+    it("use a promise that's already been instrumented and resolved", async () => {
+      const thenable = {
+        status: 'fulfilled',
+        value: 'Hi',
+        then() {},
+      };
+
+      // This will never suspend because the thenable already resolved
+      function App() {
+        return use(thenable);
+      }
+
+      await act(async () => {
+        const {pipe} = ReactDOMFizzServer.renderToPipeableStream(<App />);
+        pipe(writable);
+      });
+      expect(getVisibleChildren(container)).toEqual('Hi');
+
+      ReactDOMClient.hydrateRoot(container, <App />);
+      expect(Scheduler).toFlushAndYield([]);
+      expect(getVisibleChildren(container)).toEqual('Hi');
     });
   });
 });

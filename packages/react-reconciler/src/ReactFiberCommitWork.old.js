@@ -26,6 +26,7 @@ import type {
   OffscreenState,
   OffscreenInstance,
   OffscreenQueue,
+  OffscreenProps,
 } from './ReactFiberOffscreenComponent';
 import type {HookFlags} from './ReactHookEffectTags';
 import type {Cache} from './ReactFiberCacheComponent.old';
@@ -48,6 +49,7 @@ import {
   enableUpdaterTracking,
   enableCache,
   enableTransitionTracing,
+  enableUseEventHook,
 } from 'shared/ReactFeatureFlags';
 import {
   FunctionComponent,
@@ -162,6 +164,7 @@ import {
   Layout as HookLayout,
   Insertion as HookInsertion,
   Passive as HookPassive,
+  Snapshot as HookSnapshot,
 } from './ReactHookEffectTags';
 import {didWarnAboutReassigningProps} from './ReactFiberBeginWork.old';
 import {doesFiberContain} from './ReactFiberTreeReflection';
@@ -320,7 +323,7 @@ let shouldFireAfterActiveInstanceBlur: boolean = false;
 export function commitBeforeMutationEffects(
   root: FiberRoot,
   firstChild: Fiber,
-) {
+): boolean {
   focusedInstanceHandle = prepareForCommit(root.containerInfo);
 
   nextEffect = firstChild;
@@ -407,14 +410,24 @@ function commitBeforeMutationEffectsOnFiber(finishedWork: Fiber) {
 
   if ((flags & Snapshot) !== NoFlags) {
     setCurrentDebugFiberInDEV(finishedWork);
+  }
 
-    switch (finishedWork.tag) {
-      case FunctionComponent:
-      case ForwardRef:
-      case SimpleMemoComponent: {
-        break;
+  switch (finishedWork.tag) {
+    case FunctionComponent: {
+      if (enableUseEventHook) {
+        if ((flags & Update) !== NoFlags) {
+          // useEvent doesn't need to be cleaned up
+          commitHookEffectListMount(HookSnapshot | HookHasEffect, finishedWork);
+        }
       }
-      case ClassComponent: {
+      break;
+    }
+    case ForwardRef:
+    case SimpleMemoComponent: {
+      break;
+    }
+    case ClassComponent: {
+      if ((flags & Snapshot) !== NoFlags) {
         if (current !== null) {
           const prevProps = current.memoizedProps;
           const prevState = current.memoizedState;
@@ -468,29 +481,35 @@ function commitBeforeMutationEffectsOnFiber(finishedWork: Fiber) {
           }
           instance.__reactInternalSnapshotBeforeUpdate = snapshot;
         }
-        break;
       }
-      case HostRoot: {
+      break;
+    }
+    case HostRoot: {
+      if ((flags & Snapshot) !== NoFlags) {
         if (supportsMutation) {
           const root = finishedWork.stateNode;
           clearContainer(root.containerInfo);
         }
-        break;
       }
-      case HostComponent:
-      case HostText:
-      case HostPortal:
-      case IncompleteClassComponent:
-        // Nothing to do for these component types
-        break;
-      default: {
+      break;
+    }
+    case HostComponent:
+    case HostText:
+    case HostPortal:
+    case IncompleteClassComponent:
+      // Nothing to do for these component types
+      break;
+    default: {
+      if ((flags & Snapshot) !== NoFlags) {
         throw new Error(
           'This unit of work tag should not have side-effects. This error is ' +
             'likely caused by a bug in React. Please file an issue.',
         );
       }
     }
+  }
 
+  if ((flags & Snapshot) !== NoFlags) {
     resetCurrentDebugFiberInDEV();
   }
 }
@@ -1123,6 +1142,14 @@ function commitLayoutEffectOnFiber(
           committedLanes,
         );
       }
+      if (flags & Ref) {
+        const props: OffscreenProps = finishedWork.memoizedProps;
+        if (props.mode === 'manual') {
+          safelyAttachRef(finishedWork, finishedWork.return);
+        } else {
+          safelyDetachRef(finishedWork, finishedWork.return);
+        }
+      }
       break;
     }
     default: {
@@ -1296,7 +1323,7 @@ function commitTransitionProgress(offscreenFiber: Fiber) {
     const wasHidden = prevState !== null;
     const isHidden = nextState !== null;
 
-    const pendingMarkers = offscreenInstance.pendingMarkers;
+    const pendingMarkers = offscreenInstance._pendingMarkers;
     // If there is a name on the suspense boundary, store that in
     // the pending boundaries.
     let name = null;
@@ -2126,6 +2153,7 @@ function commitDeletionEffectsOnFiber(
       return;
     }
     case OffscreenComponent: {
+      safelyDetachRef(deletedFiber, nearestMountedAncestor);
       if (deletedFiber.mode & ConcurrentMode) {
         // If this offscreen component is hidden, we already unmounted it. Before
         // deleting the children, track that it's already unmounted so that we
@@ -2232,9 +2260,9 @@ function getRetryCache(finishedWork) {
     }
     case OffscreenComponent: {
       const instance: OffscreenInstance = finishedWork.stateNode;
-      let retryCache = instance.retryCache;
+      let retryCache = instance._retryCache;
       if (retryCache === null) {
-        retryCache = instance.retryCache = new PossiblyWeakSet();
+        retryCache = instance._retryCache = new PossiblyWeakSet();
       }
       return retryCache;
     }
@@ -2605,6 +2633,12 @@ function commitMutationEffectsOnFiber(
       return;
     }
     case OffscreenComponent: {
+      if (flags & Ref) {
+        if (current !== null) {
+          safelyDetachRef(current, current.return);
+        }
+      }
+
       const newState: OffscreenState | null = finishedWork.memoizedState;
       const isHidden = newState !== null;
       const wasHidden = current !== null && current.memoizedState !== null;
@@ -2633,9 +2667,9 @@ function commitMutationEffectsOnFiber(
         // Track the current state on the Offscreen instance so we can
         // read it during an event
         if (isHidden) {
-          offscreenInstance.visibility &= ~OffscreenVisible;
+          offscreenInstance._visibility &= ~OffscreenVisible;
         } else {
-          offscreenInstance.visibility |= OffscreenVisible;
+          offscreenInstance._visibility |= OffscreenVisible;
         }
 
         if (isHidden) {
@@ -2820,6 +2854,9 @@ export function disappearLayoutEffects(finishedWork: Fiber) {
       break;
     }
     case OffscreenComponent: {
+      // TODO (Offscreen) Check: flags & RefStatic
+      safelyDetachRef(finishedWork, finishedWork.return);
+
       const isHidden = finishedWork.memoizedState !== null;
       if (isHidden) {
         // Nested Offscreen tree is already hidden. Don't disappear
@@ -2967,6 +3004,8 @@ export function reappearLayoutEffects(
           includeWorkInProgressEffects,
         );
       }
+      // TODO: Check flags & Ref
+      safelyAttachRef(finishedWork, finishedWork.return);
       break;
     }
     default: {
@@ -3080,10 +3119,10 @@ function commitOffscreenPassiveMountEffects(
             // Add all the transitions saved in the update queue during
             // the render phase (ie the transitions associated with this boundary)
             // into the transitions set.
-            if (instance.transitions === null) {
-              instance.transitions = new Set();
+            if (instance._transitions === null) {
+              instance._transitions = new Set();
             }
-            instance.transitions.add(transition);
+            instance._transitions.add(transition);
           });
         }
 
@@ -3096,17 +3135,17 @@ function commitOffscreenPassiveMountEffects(
             // caused them
             if (markerTransitions !== null) {
               markerTransitions.forEach(transition => {
-                if (instance.transitions === null) {
-                  instance.transitions = new Set();
-                } else if (instance.transitions.has(transition)) {
+                if (instance._transitions === null) {
+                  instance._transitions = new Set();
+                } else if (instance._transitions.has(transition)) {
                   if (markerInstance.pendingBoundaries === null) {
                     markerInstance.pendingBoundaries = new Map();
                   }
-                  if (instance.pendingMarkers === null) {
-                    instance.pendingMarkers = new Set();
+                  if (instance._pendingMarkers === null) {
+                    instance._pendingMarkers = new Set();
                   }
 
-                  instance.pendingMarkers.add(markerInstance);
+                  instance._pendingMarkers.add(markerInstance);
                 }
               });
             }
@@ -3121,8 +3160,8 @@ function commitOffscreenPassiveMountEffects(
 
     // TODO: Refactor this into an if/else branch
     if (!isHidden) {
-      instance.transitions = null;
-      instance.pendingMarkers = null;
+      instance._transitions = null;
+      instance._pendingMarkers = null;
     }
   }
 }
@@ -3302,7 +3341,7 @@ function commitPassiveMountOnFiber(
       const isHidden = nextState !== null;
 
       if (isHidden) {
-        if (instance.visibility & OffscreenPassiveEffectsConnected) {
+        if (instance._visibility & OffscreenPassiveEffectsConnected) {
           // The effects are currently connected. Update them.
           recursivelyTraversePassiveMountEffects(
             finishedRoot,
@@ -3327,7 +3366,7 @@ function commitPassiveMountOnFiber(
             }
           } else {
             // Legacy Mode: Fire the effects even if the tree is hidden.
-            instance.visibility |= OffscreenPassiveEffectsConnected;
+            instance._visibility |= OffscreenPassiveEffectsConnected;
             recursivelyTraversePassiveMountEffects(
               finishedRoot,
               finishedWork,
@@ -3338,7 +3377,7 @@ function commitPassiveMountOnFiber(
         }
       } else {
         // Tree is visible
-        if (instance.visibility & OffscreenPassiveEffectsConnected) {
+        if (instance._visibility & OffscreenPassiveEffectsConnected) {
           // The effects are currently connected. Update them.
           recursivelyTraversePassiveMountEffects(
             finishedRoot,
@@ -3350,7 +3389,7 @@ function commitPassiveMountOnFiber(
           // The effects are currently disconnected. Reconnect them, while also
           // firing effects inside newly mounted trees. This also applies to
           // the initial render.
-          instance.visibility |= OffscreenPassiveEffectsConnected;
+          instance._visibility |= OffscreenPassiveEffectsConnected;
 
           const includeWorkInProgressEffects =
             (finishedWork.subtreeFlags & PassiveMask) !== NoFlags;
@@ -3482,7 +3521,7 @@ export function reconnectPassiveEffects(
       const isHidden = nextState !== null;
 
       if (isHidden) {
-        if (instance.visibility & OffscreenPassiveEffectsConnected) {
+        if (instance._visibility & OffscreenPassiveEffectsConnected) {
           // The effects are currently connected. Update them.
           recursivelyTraverseReconnectPassiveEffects(
             finishedRoot,
@@ -3508,7 +3547,7 @@ export function reconnectPassiveEffects(
             }
           } else {
             // Legacy Mode: Fire the effects even if the tree is hidden.
-            instance.visibility |= OffscreenPassiveEffectsConnected;
+            instance._visibility |= OffscreenPassiveEffectsConnected;
             recursivelyTraverseReconnectPassiveEffects(
               finishedRoot,
               finishedWork,
@@ -3526,7 +3565,7 @@ export function reconnectPassiveEffects(
         // continue traversing the tree and firing all the effects.
         //
         // We do need to set the "connected" flag on the instance, though.
-        instance.visibility |= OffscreenPassiveEffectsConnected;
+        instance._visibility |= OffscreenPassiveEffectsConnected;
 
         recursivelyTraverseReconnectPassiveEffects(
           finishedRoot,
@@ -3781,7 +3820,7 @@ function commitPassiveUnmountOnFiber(finishedWork: Fiber): void {
 
       if (
         isHidden &&
-        instance.visibility & OffscreenPassiveEffectsConnected &&
+        instance._visibility & OffscreenPassiveEffectsConnected &&
         // For backwards compatibility, don't unmount when a tree suspends. In
         // the future we may change this to unmount after a delay.
         (finishedWork.return === null ||
@@ -3791,7 +3830,7 @@ function commitPassiveUnmountOnFiber(finishedWork: Fiber): void {
         // TODO: Add option or heuristic to delay before disconnecting the
         // effects. Then if the tree reappears before the delay has elapsed, we
         // can skip toggling the effects entirely.
-        instance.visibility &= ~OffscreenPassiveEffectsConnected;
+        instance._visibility &= ~OffscreenPassiveEffectsConnected;
         recursivelyTraverseDisconnectPassiveEffects(finishedWork);
       } else {
         recursivelyTraversePassiveUnmountEffects(finishedWork);
@@ -3855,8 +3894,8 @@ export function disconnectPassiveEffect(finishedWork: Fiber): void {
     }
     case OffscreenComponent: {
       const instance: OffscreenInstance = finishedWork.stateNode;
-      if (instance.visibility & OffscreenPassiveEffectsConnected) {
-        instance.visibility &= ~OffscreenPassiveEffectsConnected;
+      if (instance._visibility & OffscreenPassiveEffectsConnected) {
+        instance._visibility &= ~OffscreenPassiveEffectsConnected;
         recursivelyTraverseDisconnectPassiveEffects(finishedWork);
       } else {
         // The effects are already disconnected.
@@ -3984,7 +4023,7 @@ function commitPassiveUnmountInsideDeletedTreeOnFiber(
         // We need to mark this fiber's parents as deleted
         const offscreenFiber: Fiber = (current.child: any);
         const instance: OffscreenInstance = offscreenFiber.stateNode;
-        const transitions = instance.transitions;
+        const transitions = instance._transitions;
         if (transitions !== null) {
           const abortReason = {
             reason: 'suspense',

@@ -225,7 +225,7 @@ function shouldConstruct(Component: Function) {
   return !!(prototype && prototype.isReactComponent);
 }
 
-export function isSimpleFunctionComponent(type: any) {
+export function isSimpleFunctionComponent(type: any): boolean {
   return (
     typeof type === 'function' &&
     !shouldConstruct(type) &&
@@ -355,7 +355,10 @@ export function createWorkInProgress(current: Fiber, pendingProps: any): Fiber {
 }
 
 // Used to reuse a Fiber for a second pass.
-export function resetWorkInProgress(workInProgress: Fiber, renderLanes: Lanes) {
+export function resetWorkInProgress(
+  workInProgress: Fiber,
+  renderLanes: Lanes,
+): Fiber {
   // This resets the Fiber to what createFiber or createWorkInProgress would
   // have set the values to before during the first pass. Ideally this wouldn't
   // be necessary but unfortunately many code paths reads from the workInProgress
@@ -690,7 +693,7 @@ export function createFiberFromSuspense(
   mode: TypeOfMode,
   lanes: Lanes,
   key: null | string,
-) {
+): Fiber {
   const fiber = createFiber(SuspenseComponent, pendingProps, key, mode);
   fiber.elementType = REACT_SUSPENSE_TYPE;
   fiber.lanes = lanes;
@@ -702,7 +705,7 @@ export function createFiberFromSuspenseList(
   mode: TypeOfMode,
   lanes: Lanes,
   key: null | string,
-) {
+): Fiber {
   const fiber = createFiber(SuspenseListComponent, pendingProps, key, mode);
   fiber.elementType = REACT_SUSPENSE_LIST_TYPE;
   fiber.lanes = lanes;
@@ -714,15 +717,15 @@ export function createFiberFromOffscreen(
   mode: TypeOfMode,
   lanes: Lanes,
   key: null | string,
-) {
+): Fiber {
   const fiber = createFiber(OffscreenComponent, pendingProps, key, mode);
   fiber.elementType = REACT_OFFSCREEN_TYPE;
   fiber.lanes = lanes;
   const primaryChildInstance: OffscreenInstance = {
-    visibility: OffscreenVisible,
-    pendingMarkers: null,
-    retryCache: null,
-    transitions: null,
+    _visibility: OffscreenVisible,
+    _pendingMarkers: null,
+    _retryCache: null,
+    _transitions: null,
   };
   fiber.stateNode = primaryChildInstance;
   return fiber;
@@ -733,17 +736,17 @@ export function createFiberFromLegacyHidden(
   mode: TypeOfMode,
   lanes: Lanes,
   key: null | string,
-) {
+): Fiber {
   const fiber = createFiber(LegacyHiddenComponent, pendingProps, key, mode);
   fiber.elementType = REACT_LEGACY_HIDDEN_TYPE;
   fiber.lanes = lanes;
   // Adding a stateNode for legacy hidden because it's currently using
   // the offscreen implementation, which depends on a state node
   const instance: OffscreenInstance = {
-    visibility: OffscreenVisible,
-    pendingMarkers: null,
-    transitions: null,
-    retryCache: null,
+    _visibility: OffscreenVisible,
+    _pendingMarkers: null,
+    _transitions: null,
+    _retryCache: null,
   };
   fiber.stateNode = instance;
   return fiber;
@@ -754,7 +757,7 @@ export function createFiberFromCache(
   mode: TypeOfMode,
   lanes: Lanes,
   key: null | string,
-) {
+): Fiber {
   const fiber = createFiber(CacheComponent, pendingProps, key, mode);
   fiber.elementType = REACT_CACHE_TYPE;
   fiber.lanes = lanes;
@@ -766,7 +769,7 @@ export function createFiberFromTracingMarker(
   mode: TypeOfMode,
   lanes: Lanes,
   key: null | string,
-) {
+): Fiber {
   const fiber = createFiber(TracingMarkerComponent, pendingProps, key, mode);
   fiber.elementType = REACT_TRACING_MARKER_TYPE;
   fiber.lanes = lanes;
